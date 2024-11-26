@@ -71,6 +71,8 @@ def calculate_indicators(data):
 def buy_order(symbol, quantity, price):
     try:
         print(f"{Fore.BLUE}Ejecutando orden de compra...{Style.RESET_ALL}")
+        # Formatear el precio correctamente
+        price = "{:.8f}".format(price)
         order = client.order_limit_buy(
             symbol=symbol,
             quantity=quantity,
@@ -97,6 +99,9 @@ def sell_order(symbol, quantity, price, buy_price=None):
         if quantity <= 0:
             print(f"{Fore.RED}La cantidad a vender es inválida después de redondear.{Style.RESET_ALL}")
             return None
+        
+        # Formatear el precio correctamente
+        price = "{:.8f}".format(price)
         
         order = client.order_limit_sell(
             symbol=symbol,
