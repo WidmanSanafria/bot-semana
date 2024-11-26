@@ -33,6 +33,8 @@ min_usdt_balance = 5  # Saldo mínimo en USDT después de cada transacción
 trailing_stop_loss_percentage = 0.03  # 3% de trailing stop-loss
 unfavorable_market_duration = 20 * 60  # 20 minutos en segundos
 n_steps = 60  # Número de pasos de tiempo para LSTM
+epochs = 50  # Número de épocas de entrenamiento
+decision_threshold = 0.01  # Umbral para tomar decisiones de compra y venta
 
 # Función para obtener datos históricos
 def get_historical_data(symbol, interval, lookback):
@@ -131,13 +133,16 @@ def calculate_take_profit(buy_price, atr, take_profit_percentage):
 
 # Función para calcular las ganancias
 def calculate_profit(buy_price, sell_price, quantity):
+    if buy_price is None or sell_price is None:
+        print(f"{Fore.RED}Error: buy_price o sell_price es None.{Style.RESET_ALL}")
+        return 0
     profit_usd = (sell_price - buy_price) * quantity
     profit_percentage = ((sell_price - buy_price) / buy_price) * 100
     print(f"{Fore.GREEN}Ganancia en USD: {profit_usd:.8f}, Ganancia en %: {profit_percentage:.2f}%{Style.RESET_ALL}")
     return profit_usd
 
 # Función para entrenar el modelo LSTM
-def train_lstm_model(data, n_steps):
+def train_lstm_model(data, n_steps, epochs):
     print(f"{Fore.BLUE}Entrenando modelo LSTM...{Style.RESET_ALL}")
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(data[['Close']])
@@ -156,7 +161,7 @@ def train_lstm_model(data, n_steps):
     model.add(Dense(1))
     
     model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X, y, batch_size=1, epochs=1)
+    model.fit(X, y, batch_size=1, epochs=epochs)
     
     print(f"{Fore.GREEN}Modelo LSTM entrenado.{Style.RESET_ALL}")
     return model, scaler
@@ -264,7 +269,7 @@ def trading_bot():
     if data is None:
         return
     data = calculate_indicators(data)
-    model, scaler = train_lstm_model(data, n_steps)
+    model, scaler = train_lstm_model(data, n_steps, epochs)
 
     try:
         while True:
@@ -290,7 +295,7 @@ def trading_bot():
 
             current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
 
-            if prediction > current_price and available_usdt >= initial_usd_amount + min_usdt_balance:
+            if prediction > current_price + decision_threshold and available_usdt >= initial_usd_amount + min_usdt_balance:
                 # Comprar la moneda seleccionada
                 quantity = (available_usdt - min_usdt_balance) / current_price
                 quantity = round_quantity(symbol, quantity)
@@ -306,7 +311,7 @@ def trading_bot():
                         unfavorable_market_start_time = None
                 else:
                     print(f"{Fore.RED}El valor de la orden es menor que el mínimo requerido.{Style.RESET_ALL}")
-            elif prediction < current_price and available_asset > 0:
+            elif prediction < current_price - decision_threshold and available_asset > 0:
                 # Vender la moneda seleccionada
                 quantity = min(round_quantity(symbol, available_asset), available_asset)
                 if quantity > 0:
