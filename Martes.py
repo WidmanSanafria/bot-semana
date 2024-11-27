@@ -223,6 +223,8 @@ def get_top_symbols():
 
 # Función para calcular el trailing stop-loss dinámico
 def dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage):
+    if buy_price is None:
+        return None
     trailing_stop_loss_price = buy_price * (1 - trailing_stop_loss_percentage)
     if current_price > buy_price:
         trailing_stop_loss_price = max(trailing_stop_loss_price, current_price * (1 - trailing_stop_loss_percentage))
@@ -344,7 +346,7 @@ def trading_bot():
 
                     # Verificar trailing stop-loss
                     trailing_stop_loss_price = dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage)
-                    if current_price <= trailing_stop_loss_price:
+                    if trailing_stop_loss_price is not None and current_price <= trailing_stop_loss_price:
                         print(f"{Fore.RED}Trailing stop-loss dinámico alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
                         half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
                         sell_order(symbol, half_quantity, buy_price)
