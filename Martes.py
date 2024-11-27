@@ -68,6 +68,14 @@ def calculate_indicators(data):
 def buy_order(symbol, quantity):
     try:
         print(f"{Fore.BLUE}Ejecutando orden de compra...{Style.RESET_ALL}")
+        
+        # Verificar el valor notional mínimo
+        current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+        min_notional = get_min_notional(symbol)
+        if quantity * current_price < min_notional:
+            print(f"{Fore.RED}El valor notional de la orden es menor que el mínimo requerido ({min_notional}).{Style.RESET_ALL}")
+            return None
+        
         order = client.order_market_buy(
             symbol=symbol,
             quantity=quantity)
@@ -92,6 +100,13 @@ def sell_order(symbol, quantity, buy_price=None):
         # Verificar si la cantidad redondeada es válida
         if quantity <= 0:
             print(f"{Fore.RED}La cantidad a vender es inválida después de redondear.{Style.RESET_ALL}")
+            return None
+        
+        # Verificar el valor notional mínimo
+        current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+        min_notional = get_min_notional(symbol)
+        if quantity * current_price < min_notional:
+            print(f"{Fore.RED}El valor notional de la orden es menor que el mínimo requerido ({min_notional}).{Style.RESET_ALL}")
             return None
         
         order = client.order_market_sell(
@@ -233,6 +248,12 @@ def dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_perc
     if current_price > buy_price:
         trailing_stop_loss_price = max(trailing_stop_loss_price, current_price * (1 - trailing_stop_loss_percentage))
     return trailing_stop_loss_price
+
+# Función para obtener el valor notional mínimo
+def get_min_notional(symbol):
+    info = client.get_symbol_info(symbol)
+    min_notional_filter = next(filter(lambda x: x['filterType'] == 'MIN_NOTIONAL', info['filters']))
+    return float(min_notional_filter['minNotional'])
 
 # Función asíncrona para manejar el trading de una moneda
 async def trade_symbol(symbol, model, scaler):
