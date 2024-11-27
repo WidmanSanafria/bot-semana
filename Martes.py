@@ -7,13 +7,11 @@ from colorama import Fore, Style, init
 import ta
 from tabulate import tabulate
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tqdm import tqdm
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 import config  # Importa el archivo config.py
+from tqdm import tqdm
 
 # Inicializa colorama
 init(autoreset=True)
@@ -27,14 +25,10 @@ client = Client(api_key, api_secret)
 
 # Parámetros del bot
 initial_usd_amount = 1  # Cantidad inicial en USD
-stop_loss_percentage = 0.02  # 2% de stop-loss
-take_profit_percentage = 0.08  # 8% de take-profit
+stop_loss_percentage = 0.10  # 10% de stop-loss
+take_profit_percentage = 0.05  # 5% de take-profit
 min_usdt_balance = 5  # Saldo mínimo en USDT después de cada transacción
 trailing_stop_loss_percentage = 0.03  # 3% de trailing stop-loss
-unfavorable_market_duration = 20 * 60  # 20 minutos en segundos
-n_steps = 60  # Número de pasos de tiempo para LSTM
-epochs = 50  # Número de épocas de entrenamiento
-decision_threshold = 0.01  # Umbral para tomar decisiones de compra y venta
 
 # Función para obtener datos históricos
 def get_historical_data(symbol, interval, lookback):
@@ -60,25 +54,17 @@ def calculate_indicators(data):
     data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
     data['MACD'] = ta.trend.macd_diff(data['Close'])
     data['Stochastic'] = ta.momentum.stoch(data['High'], data['Low'], data['Close'])
-    data['Bollinger_High'] = ta.volatility.bollinger_hband(data['Close'])
-    data['Bollinger_Low'] = ta.volatility.bollinger_lband(data['Close'])
-    data['ADX'] = ta.trend.adx(data['High'], data['Low'], data['Close'])
-    data['OBV'] = ta.volume.on_balance_volume(data['Close'], data['Volume'])
-    data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
     data = data.dropna()  # Eliminar filas con NaN
     print(f"{Fore.GREEN}Indicadores técnicos calculados.{Style.RESET_ALL}")
     return data
 
 # Función para ejecutar una orden de compra
-def buy_order(symbol, quantity, price):
+def buy_order(symbol, quantity):
     try:
         print(f"{Fore.BLUE}Ejecutando orden de compra...{Style.RESET_ALL}")
-        # Formatear el precio correctamente
-        price = "{:.8f}".format(price)
-        order = client.order_limit_buy(
+        order = client.order_market_buy(
             symbol=symbol,
-            quantity=quantity,
-            price=price)
+            quantity=quantity)
         print(f"{Fore.GREEN}Orden de compra ejecutada: {order}{Style.RESET_ALL}")
         return order
     except Exception as e:
@@ -86,7 +72,7 @@ def buy_order(symbol, quantity, price):
         return None
 
 # Función para ejecutar una orden de venta
-def sell_order(symbol, quantity, price, buy_price=None):
+def sell_order(symbol, quantity, buy_price=None):
     try:
         print(f"{Fore.BLUE}Ejecutando orden de venta...{Style.RESET_ALL}")
         
@@ -102,79 +88,69 @@ def sell_order(symbol, quantity, price, buy_price=None):
             print(f"{Fore.RED}La cantidad a vender es inválida después de redondear.{Style.RESET_ALL}")
             return None
         
-        # Formatear el precio correctamente
-        price = "{:.8f}".format(price)
-        
-        order = client.order_limit_sell(
+        order = client.order_market_sell(
             symbol=symbol,
-            quantity=quantity,
-            price=price)
+            quantity=quantity)
         print(f"{Fore.GREEN}Orden de venta ejecutada: {order}{Style.RESET_ALL}")
         if buy_price:
-            calculate_profit(buy_price, float(order['price']), quantity)
+            calculate_profit(buy_price, float(order['fills'][0]['price']), quantity)
         return order
     except Exception as e:
         print(f"{Fore.RED}Error al ejecutar orden de venta: {e}{Style.RESET_ALL}")
         return None
 
 # Función para calcular el stop-loss
-def calculate_stop_loss(buy_price, atr, stop_loss_percentage):
+def calculate_stop_loss(buy_price, stop_loss_percentage):
     print(f"{Fore.BLUE}Calculando stop-loss...{Style.RESET_ALL}")
-    stop_loss_price = buy_price - atr * stop_loss_percentage
+    stop_loss_price = buy_price * (1 - stop_loss_percentage)
     print(f"{Fore.GREEN}Stop-loss calculado: {stop_loss_price:.8f}{Style.RESET_ALL}")
     return stop_loss_price
 
 # Función para calcular el take-profit
-def calculate_take_profit(buy_price, atr, take_profit_percentage):
+def calculate_take_profit(buy_price, take_profit_percentage):
     print(f"{Fore.BLUE}Calculando take-profit...{Style.RESET_ALL}")
-    take_profit_price = buy_price + atr * take_profit_percentage
+    take_profit_price = buy_price * (1 + take_profit_percentage)
     print(f"{Fore.GREEN}Take-profit calculado: {take_profit_price:.8f}{Style.RESET_ALL}")
     return take_profit_price
 
 # Función para calcular las ganancias
 def calculate_profit(buy_price, sell_price, quantity):
-    if buy_price is None or sell_price is None:
-        print(f"{Fore.RED}Error: buy_price o sell_price es None.{Style.RESET_ALL}")
-        return 0
     profit_usd = (sell_price - buy_price) * quantity
     profit_percentage = ((sell_price - buy_price) / buy_price) * 100
     print(f"{Fore.GREEN}Ganancia en USD: {profit_usd:.8f}, Ganancia en %: {profit_percentage:.2f}%{Style.RESET_ALL}")
-    return profit_usd
 
-# Función para entrenar el modelo LSTM
-def train_lstm_model(data, n_steps, epochs):
-    print(f"{Fore.BLUE}Entrenando modelo LSTM...{Style.RESET_ALL}")
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data[['Close']])
-    
-    X, y = [], []
-    for i in range(n_steps, len(scaled_data)):
-        X.append(scaled_data[i-n_steps:i, 0])
-        y.append(scaled_data[i, 0])
-    X, y = np.array(X), np.array(y)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    
-    model = Sequential()
-    model.add(LSTM(50, return_sequences=True, input_shape=(n_steps, 1)))
-    model.add(LSTM(50, return_sequences=False))
-    model.add(Dense(25))
-    model.add(Dense(1))
-    
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X, y, batch_size=1, epochs=epochs)
-    
-    print(f"{Fore.GREEN}Modelo LSTM entrenado.{Style.RESET_ALL}")
+# Función para entrenar el modelo de machine learning
+def train_model(data):
+    print(f"{Fore.BLUE}Entrenando modelo de machine learning...{Style.RESET_ALL}")
+    # Crear etiquetas de compra/venta
+    data['Signal'] = 0
+    data.loc[data['Close'].shift(-1) > data['Close'], 'Signal'] = 1  # Compra
+    data.loc[data['Close'].shift(-1) < data['Close'], 'Signal'] = -1  # Venta
+
+    # Eliminar filas con NaN
+    data = data.dropna()
+
+    # Dividir datos en entrenamiento y prueba
+    X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic']]
+    y = data['Signal']
+
+    # Escalar datos
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Entrenar modelo de regresión logística con barra de progreso
+    model = LogisticRegression(max_iter=1000)
+    for i in tqdm(range(100), desc="Entrenando modelo", unit="iter"):
+        model.fit(X_train, y_train)
+
+    # Evaluar modelo
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"{Fore.GREEN}Modelo entrenado con precisión: {accuracy}{Style.RESET_ALL}")
+
     return model, scaler
-
-# Función para predecir con el modelo LSTM
-def predict_with_lstm(model, scaler, data, n_steps):
-    scaled_data = scaler.transform(data[['Close']])
-    X = []
-    X.append(scaled_data[-n_steps:, 0])
-    X = np.array(X)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    predictions = model.predict(X)
-    return scaler.inverse_transform(predictions)
 
 # Función para verificar el saldo disponible
 def check_balance(asset):
@@ -231,7 +207,7 @@ def get_top_symbols():
     try:
         tickers = client.get_ticker()
         tickers_sorted = sorted(tickers, key=lambda x: float(x['volume']), reverse=True)
-        top_symbols = [ticker['symbol'] for ticker in tickers_sorted if 'USDT' in ticker['symbol']][:10]
+        top_symbols = [ticker['symbol'] for ticker in tickers_sorted[:10]]
         print(f"{Fore.CYAN}Monedas seleccionadas:{Style.RESET_ALL}")
         for i, symbol in enumerate(top_symbols, 1):
             print(f"{i}. {symbol}")
@@ -250,26 +226,30 @@ def trading_bot():
     stop_loss_price = None
     take_profit_price = None
     last_check_time = time.time()
-    total_operations = 0
-    total_profit = 0
-    unfavorable_market_start_time = None
 
     # Obtener las 10 mejores monedas por volumen
     top_symbols = get_top_symbols()
     if not top_symbols:
         return
 
-    # Seleccionar automáticamente la moneda con la mejor combinación de volumen y tendencia
-    symbol_index = 0
-    symbol = top_symbols[symbol_index]
-    print(f"{Fore.CYAN}Moneda seleccionada automáticamente: {symbol}{Style.RESET_ALL}")
+    # Permitir al usuario seleccionar una moneda
+    while True:
+        try:
+            choice = int(input("Seleccione una moneda (número): "))
+            if 1 <= choice <= len(top_symbols):
+                symbol = top_symbols[choice - 1]
+                break
+            else:
+                print(f"{Fore.RED}Selección inválida. Intente nuevamente.{Style.RESET_ALL}")
+        except ValueError:
+            print(f"{Fore.RED}Entrada inválida. Intente nuevamente.{Style.RESET_ALL}")
 
-    # Obtener datos históricos y entrenar modelo LSTM
+    # Obtener datos históricos y entrenar modelo
     data = get_historical_data(symbol, interval, lookback)
     if data is None:
         return
     data = calculate_indicators(data)
-    model, scaler = train_lstm_model(data, n_steps, epochs)
+    model, scaler = train_model(data)
 
     try:
         while True:
@@ -284,87 +264,66 @@ def trading_bot():
                 continue
 
             data = calculate_indicators(data)
-            prediction = predict_with_lstm(model, scaler, data, n_steps)
+            X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic']].iloc[-1:]
+            X_scaled = scaler.transform(X)
+            signal = model.predict(X_scaled)[0]
 
             # Verificar saldo disponible en la moneda seleccionada y USDT
             available_asset = check_balance(symbol.replace('USDT', ''))
             available_usdt = check_balance('USDT')
 
-            # Depuración: Mostrar la predicción generada
-            print(f"{Fore.CYAN}Predicción generada: {prediction[0][0]}{Style.RESET_ALL}")
-
-            current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-
-            if prediction > current_price + decision_threshold and available_usdt >= initial_usd_amount + min_usdt_balance:
+            if signal == 1 and available_usdt < initial_usd_amount:
+                # Vender otra moneda para obtener USDT
+                print(f"{Fore.YELLOW}Saldo USDT insuficiente para comprar {symbol}. Necesitas recargar USDT.{Style.RESET_ALL}")
+            elif signal == 1 and available_usdt >= initial_usd_amount + min_usdt_balance:
                 # Comprar la moneda seleccionada
+                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 quantity = (available_usdt - min_usdt_balance) / current_price
                 quantity = round_quantity(symbol, quantity)
                 if quantity * current_price >= initial_usd_amount:
                     print(f"{Fore.GREEN}Señal de compra detectada. Comprando {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
-                    order = buy_order(symbol, quantity, current_price)
+                    order = buy_order(symbol, quantity)
                     if order:
-                        buy_price = float(order['price'])
-                        stop_loss_price = calculate_stop_loss(buy_price, data['ATR'].iloc[-1], stop_loss_percentage)
-                        take_profit_price = calculate_take_profit(buy_price, data['ATR'].iloc[-1], take_profit_percentage)
+                        buy_price = float(order['fills'][0]['price'])
+                        stop_loss_price = calculate_stop_loss(buy_price, stop_loss_percentage)
+                        take_profit_price = calculate_take_profit(buy_price, take_profit_percentage)
                         print(f"{Fore.GREEN}Precio de compra: {buy_price:.8f}, Stop-loss: {stop_loss_price:.8f}, Take-profit: {take_profit_price:.8f}{Style.RESET_ALL}")
-                        total_operations += 1
-                        unfavorable_market_start_time = None
                 else:
                     print(f"{Fore.RED}El valor de la orden es menor que el mínimo requerido.{Style.RESET_ALL}")
-            elif prediction < current_price - decision_threshold and available_asset > 0:
+            elif signal == -1 and available_asset > 0:
                 # Vender la moneda seleccionada
+                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 quantity = min(round_quantity(symbol, available_asset), available_asset)
                 if quantity > 0:
                     print(f"{Fore.YELLOW}Señal de venta detectada. Vendiendo {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
-                    sell_order(symbol, quantity, current_price, buy_price)
+                    sell_order(symbol, quantity, buy_price)
                     buy_price = None
                     stop_loss_price = None
                     take_profit_price = None
                     print(f"{Fore.YELLOW}Venta completada.{Style.RESET_ALL}")
-                    total_operations += 1
-                    total_profit += calculate_profit(buy_price, current_price, quantity)
-                    unfavorable_market_start_time = None
-                    # Cambiar de moneda si se pierde
-                    if current_price < buy_price:
-                        symbol_index = (symbol_index + 1) % len(top_symbols)
-                        symbol = top_symbols[symbol_index]
-                        print(f"{Fore.CYAN}Cambiando a la siguiente moneda: {symbol}{Style.RESET_ALL}")
                 else:
                     print(f"{Fore.RED}La cantidad de {symbol.replace('USDT', '')} a vender es inválida.{Style.RESET_ALL}")
             else:
+                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 print(f"{Fore.LIGHTGREEN_EX}Mercado desfavorable... Precio actual: {current_price:.8f}{Style.RESET_ALL}")
-                if unfavorable_market_start_time is None:
-                    unfavorable_market_start_time = time.time()
-                elif time.time() - unfavorable_market_start_time > unfavorable_market_duration:
-                    print(f"{Fore.YELLOW}Mercado desfavorable durante más de 20 minutos. Cambiando a la siguiente moneda...{Style.RESET_ALL}")
-                    symbol_index = (symbol_index + 1) % len(top_symbols)
-                    symbol = top_symbols[symbol_index]
-                    print(f"{Fore.CYAN}Moneda seleccionada automáticamente: {symbol}{Style.RESET_ALL}")
-                    unfavorable_market_start_time = None
 
             # Verificar stop-loss y trailing stop-loss
             if buy_price is not None:
                 current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 if current_price <= stop_loss_price:
                     print(f"{Fore.RED}Stop-loss alcanzado. Vendiendo a {current_price:.8f}...{Style.RESET_ALL}")
-                    sell_order(symbol, round_quantity(symbol, initial_usd_amount / buy_price), current_price, buy_price)
+                    sell_order(symbol, round_quantity(symbol, initial_usd_amount / buy_price), buy_price)
                     buy_price = None
                     stop_loss_price = None
                     take_profit_price = None
                     print(f"{Fore.RED}Venta por stop-loss completada.{Style.RESET_ALL}")
-                    total_operations += 1
-                    total_profit += calculate_profit(buy_price, current_price, quantity)
-                    unfavorable_market_start_time = None
 
                 # Verificar take-profit en cada iteración
                 elif current_price >= take_profit_price:
                     print(f"{Fore.GREEN}Take-profit alcanzado. Vendiendo la mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
                     half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
-                    sell_order(symbol, half_quantity, current_price, buy_price)
+                    sell_order(symbol, half_quantity, buy_price)
                     print(f"{Fore.GREEN}Venta por take-profit completada.{Style.RESET_ALL}")
-                    total_operations += 1
-                    total_profit += calculate_profit(buy_price, current_price, half_quantity)
-                    unfavorable_market_start_time = None
 
                 # Verificar trailing stop-loss
                 trailing_stop_loss_price = buy_price * (1 - trailing_stop_loss_percentage)
@@ -373,22 +332,15 @@ def trading_bot():
                 if current_price <= trailing_stop_loss_price:
                     print(f"{Fore.RED}Trailing stop-loss alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
                     half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
-                    sell_order(symbol, half_quantity, current_price, buy_price)
+                    sell_order(symbol, half_quantity, buy_price)
                     buy_price = None
                     stop_loss_price = None
                     take_profit_price = None
                     print(f"{Fore.RED}Venta por trailing stop-loss completada.{Style.RESET_ALL}")
-                    total_operations += 1
-                    total_profit += calculate_profit(buy_price, current_price, half_quantity)
-                    unfavorable_market_start_time = None
 
-            # Mostrar resumen de la iteración
-            print(f"{Fore.CYAN}Resumen de la iteración:{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Saldo USDT: {available_usdt:.8f}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Saldo {symbol.replace('USDT', '')}: {available_asset:.8f}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Precio actual: {current_price:.8f}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Número de operaciones: {total_operations}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Ganancia total: {total_profit:.8f} USD{Style.RESET_ALL}")
+            # Mostrar datos formateados
+            print(f"{Fore.CYAN}Datos actuales:{Style.RESET_ALL}")
+            print(tabulate(data.tail(), headers='keys', tablefmt='pretty', showindex=False))
 
             # Obtener y mostrar información de órdenes abiertas
             open_orders = get_open_orders(symbol)
@@ -398,14 +350,7 @@ def trading_bot():
             market_status = get_market_status(symbol)
             print(f"{Fore.CYAN}Precio actual: {market_status['price']}{Style.RESET_ALL}")
 
-            # Mostrar información de compra y venta en un recuadro claro
-            if buy_price is not None:
-                print(f"{Fore.YELLOW}Compra: {buy_price:.8f} | Venta objetivo: {take_profit_price:.8f}{Style.RESET_ALL}")
-
-            # Separación con asteriscos
-            print("*" * 80)
-
-            time.sleep(60)  # Esperar 60 segundos antes de la siguiente iteración
+            time.sleep(30)  # Esperar 30 segundos antes de la siguiente iteración
 
     except KeyboardInterrupt:
         print(f"{Fore.YELLOW}Bot detenido por el usuario.{Style.RESET_ALL}")
