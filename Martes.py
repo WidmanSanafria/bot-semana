@@ -345,7 +345,7 @@ async def trade_symbol(symbol, model, scaler):
                 take_profit_price = None
                 print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
 
-        await asyncio.sleep(30)  # Esperar 30 segundos antes de la siguiente iteración
+        await asyncio.sleep(20)  # Esperar 30 segundos antes de la siguiente iteración
 
 # Función principal del bot
 async def trading_bot():
@@ -356,7 +356,7 @@ async def trading_bot():
 
     # Permitir al usuario seleccionar 3 monedas
     selected_symbols = []
-    while len(selected_symbols) < 3:
+    while len(selected_symbols) < 4:
         try:
             choice = int(input(f"Seleccione una moneda (número, {3 - len(selected_symbols)} restantes): "))
             if 1 <= choice <= len(top_symbols) and top_symbols[choice - 1] not in selected_symbols:
@@ -370,7 +370,7 @@ async def trading_bot():
     models = {}
     scalers = {}
     for symbol in selected_symbols:
-        data = get_historical_data(symbol, '1m', '1000')
+        data = get_historical_data(symbol, '1m', '10080')
         if data is None:
             continue
         data = calculate_indicators(data)
