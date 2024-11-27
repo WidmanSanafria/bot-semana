@@ -161,6 +161,9 @@ def train_model(data):
 def check_balance(asset):
     try:
         balance = client.get_asset_balance(asset=asset)
+        if balance is None:
+            print(f"{Fore.RED}No se pudo obtener el saldo para {asset}.{Style.RESET_ALL}")
+            return 0
         available_balance = float(balance['free'])
         print(f"{Fore.CYAN}Saldo disponible en {asset}: {available_balance}{Style.RESET_ALL}")
         return available_balance
