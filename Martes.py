@@ -6,8 +6,9 @@ from binance.enums import *
 from colorama import Fore, Style, init
 import ta
 from tabulate import tabulate
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 import config  # Importa el archivo config.py
@@ -55,6 +56,9 @@ def calculate_indicators(data):
     data['MACD'] = ta.trend.macd_diff(data['Close'])
     data['Stochastic'] = ta.momentum.stoch(data['High'], data['Low'], data['Close'])
     data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
+    data['ADX'] = ta.trend.adx(data['High'], data['Low'], data['Close'])
+    data['Bollinger_High'] = ta.volatility.bollinger_hband(data['Close'])
+    data['Bollinger_Low'] = ta.volatility.bollinger_lband(data['Close'])
     data = data.dropna()  # Eliminar filas con NaN
     print(f"{Fore.GREEN}Indicadores técnicos calculados.{Style.RESET_ALL}")
     return data
@@ -132,7 +136,7 @@ def train_model(data):
     data = data.dropna()
 
     # Dividir datos en entrenamiento y prueba
-    X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR']]
+    X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR', 'ADX', 'Bollinger_High', 'Bollinger_Low']]
     y = data['Signal']
 
     # Escalar datos
@@ -141,8 +145,8 @@ def train_model(data):
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Entrenar modelo de regresión logística con barra de progreso
-    model = LogisticRegression(max_iter=1000)
+    # Entrenar modelo de Random Forest con barra de progreso
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
     for i in tqdm(range(100), desc="Entrenando modelo", unit="iter"):
         model.fit(X_train, y_train)
 
@@ -203,7 +207,7 @@ def get_market_status(symbol):
         print(f"{Fore.RED}Error al obtener el estado del mercado: {e}{Style.RESET_ALL}")
         return None
 
-# Función para obtener las 10 mejores monedas por volumen
+# Función para obtener las 10 mejores monedas por volumen y otros indicadores
 def get_top_symbols():
     try:
         tickers = client.get_ticker()
@@ -240,24 +244,29 @@ def trading_bot():
     if not top_symbols:
         return
 
-    # Permitir al usuario seleccionar una moneda
-    while True:
+    # Permitir al usuario seleccionar 3 monedas
+    selected_symbols = []
+    while len(selected_symbols) < 3:
         try:
-            choice = int(input("Seleccione una moneda (número): "))
-            if 1 <= choice <= len(top_symbols):
-                symbol = top_symbols[choice - 1]
-                break
+            choice = int(input(f"Seleccione una moneda (número, {3 - len(selected_symbols)} restantes): "))
+            if 1 <= choice <= len(top_symbols) and top_symbols[choice - 1] not in selected_symbols:
+                selected_symbols.append(top_symbols[choice - 1])
             else:
                 print(f"{Fore.RED}Selección inválida. Intente nuevamente.{Style.RESET_ALL}")
         except ValueError:
             print(f"{Fore.RED}Entrada inválida. Intente nuevamente.{Style.RESET_ALL}")
 
-    # Obtener datos históricos y entrenar modelo
-    data = get_historical_data(symbol, interval, lookback)
-    if data is None:
-        return
-    data = calculate_indicators(data)
-    model, scaler = train_model(data)
+    # Obtener datos históricos y entrenar modelo para cada moneda
+    models = {}
+    scalers = {}
+    for symbol in selected_symbols:
+        data = get_historical_data(symbol, interval, lookback)
+        if data is None:
+            continue
+        data = calculate_indicators(data)
+        model, scaler = train_model(data)
+        models[symbol] = model
+        scalers[symbol] = scaler
 
     try:
         while True:
@@ -266,95 +275,95 @@ def trading_bot():
                 time.sleep(60)
                 continue
 
-            data = get_historical_data(symbol, interval, lookback)
-            if data is None:
-                time.sleep(60)
-                continue
+            for symbol in selected_symbols:
+                data = get_historical_data(symbol, interval, lookback)
+                if data is None:
+                    continue
 
-            data = calculate_indicators(data)
-            X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR']].iloc[-1:]
-            X_scaled = scaler.transform(X)
-            signal = model.predict(X_scaled)[0]
+                data = calculate_indicators(data)
+                X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR', 'ADX', 'Bollinger_High', 'Bollinger_Low']].iloc[-1:]
+                X_scaled = scalers[symbol].transform(X)
+                signal = models[symbol].predict(X_scaled)[0]
 
-            # Verificar saldo disponible en la moneda seleccionada y USDT
-            available_asset = check_balance(symbol.replace('USDT', ''))
-            available_usdt = check_balance('USDT')
+                # Verificar saldo disponible en la moneda seleccionada y USDT
+                available_asset = check_balance(symbol.replace('USDT', ''))
+                available_usdt = check_balance('USDT')
 
-            if signal == 1 and available_usdt < initial_usd_amount:
-                # Vender otra moneda para obtener USDT
-                print(f"{Fore.YELLOW}Saldo USDT insuficiente para comprar {symbol}. Necesitas recargar USDT.{Style.RESET_ALL}")
-            elif signal == 1 and available_usdt >= initial_usd_amount + min_usdt_balance:
-                # Comprar la moneda seleccionada
-                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                quantity = (available_usdt - min_usdt_balance) / current_price
-                quantity = round_quantity(symbol, quantity)
-                if quantity * current_price >= initial_usd_amount:
-                    print(f"{Fore.GREEN}Señal de compra detectada. Comprando {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
-                    order = buy_order(symbol, quantity)
-                    if order:
-                        buy_price = float(order['fills'][0]['price'])
-                        stop_loss_price = calculate_stop_loss(buy_price, stop_loss_percentage)
-                        take_profit_price = calculate_take_profit(buy_price, take_profit_percentage)
-                        print(f"{Fore.GREEN}Precio de compra: {buy_price:.8f}, Stop-loss: {stop_loss_price:.8f}, Take-profit: {take_profit_price:.8f}{Style.RESET_ALL}")
+                if signal == 1 and available_usdt < initial_usd_amount:
+                    # Vender otra moneda para obtener USDT
+                    print(f"{Fore.YELLOW}Saldo USDT insuficiente para comprar {symbol}. Necesitas recargar USDT.{Style.RESET_ALL}")
+                elif signal == 1 and available_usdt >= initial_usd_amount + min_usdt_balance:
+                    # Comprar la moneda seleccionada
+                    current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    quantity = (available_usdt - min_usdt_balance) / current_price
+                    quantity = round_quantity(symbol, quantity)
+                    if quantity * current_price >= initial_usd_amount:
+                        print(f"{Fore.GREEN}Señal de compra detectada. Comprando {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
+                        order = buy_order(symbol, quantity)
+                        if order:
+                            buy_price = float(order['fills'][0]['price'])
+                            stop_loss_price = calculate_stop_loss(buy_price, stop_loss_percentage)
+                            take_profit_price = calculate_take_profit(buy_price, take_profit_percentage)
+                            print(f"{Fore.GREEN}Precio de compra: {buy_price:.8f}, Stop-loss: {stop_loss_price:.8f}, Take-profit: {take_profit_price:.8f}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}El valor de la orden es menor que el mínimo requerido.{Style.RESET_ALL}")
+                elif signal == -1 and available_asset > 0:
+                    # Vender la moneda seleccionada
+                    current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    quantity = min(round_quantity(symbol, available_asset), available_asset)
+                    if quantity > 0:
+                        print(f"{Fore.YELLOW}Señal de venta detectada. Vendiendo {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
+                        sell_order(symbol, quantity, buy_price)
+                        buy_price = None
+                        stop_loss_price = None
+                        take_profit_price = None
+                        print(f"{Fore.YELLOW}Venta completada.{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}La cantidad de {symbol.replace('USDT', '')} a vender es inválida.{Style.RESET_ALL}")
                 else:
-                    print(f"{Fore.RED}El valor de la orden es menor que el mínimo requerido.{Style.RESET_ALL}")
-            elif signal == -1 and available_asset > 0:
-                # Vender la moneda seleccionada
-                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                quantity = min(round_quantity(symbol, available_asset), available_asset)
-                if quantity > 0:
-                    print(f"{Fore.YELLOW}Señal de venta detectada. Vendiendo {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
-                    sell_order(symbol, quantity, buy_price)
-                    buy_price = None
-                    stop_loss_price = None
-                    take_profit_price = None
-                    print(f"{Fore.YELLOW}Venta completada.{Style.RESET_ALL}")
-                else:
-                    print(f"{Fore.RED}La cantidad de {symbol.replace('USDT', '')} a vender es inválida.{Style.RESET_ALL}")
-            else:
-                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                print(f"{Fore.LIGHTGREEN_EX}Mercado desfavorable... Precio actual: {current_price:.8f}{Style.RESET_ALL}")
+                    current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    print(f"{Fore.LIGHTGREEN_EX}Mercado desfavorable... Precio actual: {current_price:.8f}{Style.RESET_ALL}")
 
-            # Verificar stop-loss y trailing stop-loss
-            if buy_price is not None:
-                current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                if current_price <= stop_loss_price:
-                    print(f"{Fore.RED}Stop-loss alcanzado. Vendiendo a {current_price:.8f}...{Style.RESET_ALL}")
-                    sell_order(symbol, round_quantity(symbol, initial_usd_amount / buy_price), buy_price)
-                    buy_price = None
-                    stop_loss_price = None
-                    take_profit_price = None
-                    print(f"{Fore.RED}Venta por stop-loss completada.{Style.RESET_ALL}")
+                # Verificar stop-loss y trailing stop-loss
+                if buy_price is not None:
+                    current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    if current_price <= stop_loss_price:
+                        print(f"{Fore.RED}Stop-loss alcanzado. Vendiendo a {current_price:.8f}...{Style.RESET_ALL}")
+                        sell_order(symbol, round_quantity(symbol, initial_usd_amount / buy_price), buy_price)
+                        buy_price = None
+                        stop_loss_price = None
+                        take_profit_price = None
+                        print(f"{Fore.RED}Venta por stop-loss completada.{Style.RESET_ALL}")
 
-                # Verificar take-profit en cada iteración
-                elif current_price >= take_profit_price:
-                    print(f"{Fore.GREEN}Take-profit alcanzado. Vendiendo la mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
-                    half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
-                    sell_order(symbol, half_quantity, buy_price)
-                    print(f"{Fore.GREEN}Venta por take-profit completada.{Style.RESET_ALL}")
+                    # Verificar take-profit en cada iteración
+                    elif current_price >= take_profit_price:
+                        print(f"{Fore.GREEN}Take-profit alcanzado. Vendiendo la mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
+                        half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
+                        sell_order(symbol, half_quantity, buy_price)
+                        print(f"{Fore.GREEN}Venta por take-profit completada.{Style.RESET_ALL}")
 
-                # Verificar trailing stop-loss
-                trailing_stop_loss_price = dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage)
-                if current_price <= trailing_stop_loss_price:
-                    print(f"{Fore.RED}Trailing stop-loss dinámico alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
-                    half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
-                    sell_order(symbol, half_quantity, buy_price)
-                    buy_price = None
-                    stop_loss_price = None
-                    take_profit_price = None
-                    print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
+                    # Verificar trailing stop-loss
+                    trailing_stop_loss_price = dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage)
+                    if current_price <= trailing_stop_loss_price:
+                        print(f"{Fore.RED}Trailing stop-loss dinámico alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
+                        half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
+                        sell_order(symbol, half_quantity, buy_price)
+                        buy_price = None
+                        stop_loss_price = None
+                        take_profit_price = None
+                        print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
 
-            # Mostrar datos formateados
-            print(f"{Fore.CYAN}Datos actuales:{Style.RESET_ALL}")
-            print(tabulate(data.tail(), headers='keys', tablefmt='pretty', showindex=False))
+                # Mostrar datos formateados
+                print(f"{Fore.CYAN}Datos actuales para {symbol}:{Style.RESET_ALL}")
+                print(tabulate(data.tail(), headers='keys', tablefmt='pretty', showindex=False))
 
-            # Obtener y mostrar información de órdenes abiertas
-            open_orders = get_open_orders(symbol)
-            print(f"{Fore.CYAN}Número de órdenes abiertas: {len(open_orders)}{Style.RESET_ALL}")
+                # Obtener y mostrar información de órdenes abiertas
+                open_orders = get_open_orders(symbol)
+                print(f"{Fore.CYAN}Número de órdenes abiertas para {symbol}: {len(open_orders)}{Style.RESET_ALL}")
 
-            # Obtener y mostrar el estado actual del mercado
-            market_status = get_market_status(symbol)
-            print(f"{Fore.CYAN}Precio actual: {market_status['price']}{Style.RESET_ALL}")
+                # Obtener y mostrar el estado actual del mercado
+                market_status = get_market_status(symbol)
+                print(f"{Fore.CYAN}Precio actual para {symbol}: {market_status['price']}{Style.RESET_ALL}")
 
             time.sleep(30)  # Esperar 30 segundos antes de la siguiente iteración
 
