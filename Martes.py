@@ -54,6 +54,7 @@ def calculate_indicators(data):
     data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
     data['MACD'] = ta.trend.macd_diff(data['Close'])
     data['Stochastic'] = ta.momentum.stoch(data['High'], data['Low'], data['Close'])
+    data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
     data = data.dropna()  # Eliminar filas con NaN
     print(f"{Fore.GREEN}Indicadores técnicos calculados.{Style.RESET_ALL}")
     return data
@@ -131,7 +132,7 @@ def train_model(data):
     data = data.dropna()
 
     # Dividir datos en entrenamiento y prueba
-    X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic']]
+    X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR']]
     y = data['Signal']
 
     # Escalar datos
@@ -216,6 +217,13 @@ def get_top_symbols():
         print(f"{Fore.RED}Error al obtener las mejores monedas: {e}{Style.RESET_ALL}")
         return []
 
+# Función para calcular el trailing stop-loss dinámico
+def dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage):
+    trailing_stop_loss_price = buy_price * (1 - trailing_stop_loss_percentage)
+    if current_price > buy_price:
+        trailing_stop_loss_price = max(trailing_stop_loss_price, current_price * (1 - trailing_stop_loss_percentage))
+    return trailing_stop_loss_price
+
 # Función principal del bot
 def trading_bot():
     short_window = 10
@@ -264,7 +272,7 @@ def trading_bot():
                 continue
 
             data = calculate_indicators(data)
-            X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic']].iloc[-1:]
+            X = data[['MA_short', 'MA_long', 'RSI', 'MACD', 'Stochastic', 'ATR']].iloc[-1:]
             X_scaled = scaler.transform(X)
             signal = model.predict(X_scaled)[0]
 
@@ -326,17 +334,15 @@ def trading_bot():
                     print(f"{Fore.GREEN}Venta por take-profit completada.{Style.RESET_ALL}")
 
                 # Verificar trailing stop-loss
-                trailing_stop_loss_price = buy_price * (1 - trailing_stop_loss_percentage)
-                if current_price > buy_price:
-                    trailing_stop_loss_price = max(trailing_stop_loss_price, current_price * (1 - trailing_stop_loss_percentage))
+                trailing_stop_loss_price = dynamic_trailing_stop_loss(buy_price, current_price, trailing_stop_loss_percentage)
                 if current_price <= trailing_stop_loss_price:
-                    print(f"{Fore.RED}Trailing stop-loss alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
+                    print(f"{Fore.RED}Trailing stop-loss dinámico alcanzado. Vendiendo la otra mitad de la posición a {current_price:.8f}...{Style.RESET_ALL}")
                     half_quantity = round_quantity(symbol, (initial_usd_amount / buy_price) / 2)
                     sell_order(symbol, half_quantity, buy_price)
                     buy_price = None
                     stop_loss_price = None
                     take_profit_price = None
-                    print(f"{Fore.RED}Venta por trailing stop-loss completada.{Style.RESET_ALL}")
+                    print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
 
             # Mostrar datos formateados
             print(f"{Fore.CYAN}Datos actuales:{Style.RESET_ALL}")
