@@ -309,7 +309,7 @@ def trading_bot():
                             buy_price = float(order['fills'][0]['price'])
                             stop_loss_price = calculate_stop_loss(buy_price, stop_loss_percentage)
                             take_profit_price = calculate_take_profit(buy_price, take_profit_percentage)
-                            print(f"{Fore.GREEN}Precio de compra: {buy_price:.8f}, Stop-loss: {stop_loss_price:.8f}, Take-profit: {take_profit_price:.8f}{Style.RESET_ALL}")
+                            print(f"{Fore.GREEN}Compré {quantity} {symbol.replace('USDT', '')} a {buy_price:.8f}. Esperando vender a {take_profit_price:.8f} para ganar {take_profit_price - buy_price:.8f} por unidad.{Style.RESET_ALL}")
                     else:
                         print(f"{Fore.RED}El valor de la orden es menor que el mínimo requerido.{Style.RESET_ALL}")
                 elif signal == -1 and available_asset > 0:
@@ -357,18 +357,6 @@ def trading_bot():
                         stop_loss_price = None
                         take_profit_price = None
                         print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
-
-                # Mostrar datos formateados
-                print(f"{Fore.CYAN}Datos actuales para {symbol}:{Style.RESET_ALL}")
-                print(tabulate(data.tail(), headers='keys', tablefmt='pretty', showindex=False))
-
-                # Obtener y mostrar información de órdenes abiertas
-                open_orders = get_open_orders(symbol)
-                print(f"{Fore.CYAN}Número de órdenes abiertas para {symbol}: {len(open_orders)}{Style.RESET_ALL}")
-
-                # Obtener y mostrar el estado actual del mercado
-                market_status = get_market_status(symbol)
-                print(f"{Fore.CYAN}Precio actual para {symbol}: {market_status['price']}{Style.RESET_ALL}")
 
             time.sleep(30)  # Esperar 30 segundos antes de la siguiente iteración
 
