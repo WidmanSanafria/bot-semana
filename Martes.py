@@ -192,8 +192,8 @@ def round_quantity(symbol, quantity):
     info = client.get_symbol_info(symbol)
     step_size = float(next(filter(lambda x: x['filterType'] == 'LOT_SIZE', info['filters']))['stepSize'])
     precision = int(round(-math.log(step_size, 10), 0))
-    # Usar floor para redondear hacia abajo
-    quantity = math.floor(quantity * (10 ** precision)) / (10 ** precision)
+    # Usar ceil para redondear hacia arriba
+    quantity = math.ceil(quantity * (10 ** precision)) / (10 ** precision)
     print(f"Step size: {step_size}, Precisión: {precision}, Cantidad original: {quantity}")
     return quantity
 
@@ -267,7 +267,7 @@ async def trade_symbol(symbol, model, scaler):
             await asyncio.sleep(60)
             continue
 
-        data = get_historical_data(symbol, '1m', '1000')
+        data = get_historical_data(symbol, '1m', '10080')  # Cambiar a 10080 minutos (1 semana)
         if data is None:
             await asyncio.sleep(60)
             continue
@@ -302,7 +302,8 @@ async def trade_symbol(symbol, model, scaler):
         elif signal == -1 and available_asset > 0:
             # Vender la moneda seleccionada
             current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-            quantity = min(round_quantity(symbol, available_asset), available_asset)
+            quantity = available_asset  # Vender todo el saldo disponible
+            quantity = round_quantity(symbol, quantity)
             if quantity > 0:
                 print(f"{Fore.YELLOW}Señal de venta detectada. Vendiendo {quantity} {symbol.replace('USDT', '')} a {current_price:.8f}...{Style.RESET_ALL}")
                 sell_order(symbol, quantity, buy_price)
@@ -345,7 +346,7 @@ async def trade_symbol(symbol, model, scaler):
                 take_profit_price = None
                 print(f"{Fore.RED}Venta por trailing stop-loss dinámico completada.{Style.RESET_ALL}")
 
-        await asyncio.sleep(20)  # Esperar 30 segundos antes de la siguiente iteración
+        await asyncio.sleep(30)  # Esperar 30 segundos antes de la siguiente iteración
 
 # Función principal del bot
 async def trading_bot():
@@ -354,11 +355,11 @@ async def trading_bot():
     if not top_symbols:
         return
 
-    # Permitir al usuario seleccionar 3 monedas
+    # Permitir al usuario seleccionar 4 monedas
     selected_symbols = []
     while len(selected_symbols) < 4:
         try:
-            choice = int(input(f"Seleccione una moneda (número, {3 - len(selected_symbols)} restantes): "))
+            choice = int(input(f"Seleccione una moneda (número, {4 - len(selected_symbols)} restantes): "))
             if 1 <= choice <= len(top_symbols) and top_symbols[choice - 1] not in selected_symbols:
                 selected_symbols.append(top_symbols[choice - 1])
             else:
@@ -370,7 +371,7 @@ async def trading_bot():
     models = {}
     scalers = {}
     for symbol in selected_symbols:
-        data = get_historical_data(symbol, '1m', '10080')
+        data = get_historical_data(symbol, '1m', '8080')  # Cambiar a 10080 minutos (1 semana)
         if data is None:
             continue
         data = calculate_indicators(data)
