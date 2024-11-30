@@ -14,6 +14,9 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tqdm import tqdm
 import config  # Importa el archivo config.py
+import asyncio
+import aiohttp
+import mejoresMonedas1OK  # Importa el script de búsqueda de mejores monedas
 
 # Inicializa colorama
 init(autoreset=True)
@@ -27,8 +30,6 @@ client = Client(api_key, api_secret)
 
 # Parámetros del bot
 initial_usd_amount = 1  # Cantidad inicial en USD
-stop_loss_percentage = 0.02  # 2% de stop-loss
-take_profit_percentage = 0.08  # 8% de take-profit
 min_usdt_balance = 5  # Saldo mínimo en USDT después de cada transacción
 trailing_stop_loss_percentage = 0.03  # 3% de trailing stop-loss
 unfavorable_market_duration = 20 * 60  # 20 minutos en segundos
@@ -38,11 +39,11 @@ n_steps = 60  # Número de pasos de tiempo para LSTM
 def get_historical_data(symbol, interval, lookback):
     try:
         print(f"{Fore.BLUE}Obteniendo datos históricos...{Style.RESET_ALL}")
-        frame = pd.DataFrame(client.get_historical_klines(symbol, interval, lookback + ' min ago UTC'))
-        frame = frame.iloc[:, :6]
-        frame.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+        klines = client.get_historical_klines(symbol, interval, lookback + ' min ago UTC')
+        frame = pd.DataFrame(klines, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'CloseTime', 'QuoteAssetVolume', 'NumberOfTrades', 'TakerBuyBaseAssetVolume', 'TakerBuyQuoteAssetVolume', 'Ignore'])
+        frame = frame[['Time', 'Open', 'High', 'Low', 'Close', 'Volume']]
+        frame['Time'] = pd.to_datetime(frame['Time'], unit='ms')
         frame = frame.set_index('Time')
-        frame.index = pd.to_datetime(frame.index, unit='ms')
         frame = frame.astype(float)
         print(f"{Fore.GREEN}Datos históricos obtenidos.{Style.RESET_ALL}")
         return frame
@@ -52,20 +53,24 @@ def get_historical_data(symbol, interval, lookback):
 
 # Función para calcular indicadores técnicos
 def calculate_indicators(data):
-    print(f"{Fore.BLUE}Calculando indicadores técnicos...{Style.RESET_ALL}")
-    data['MA_short'] = ta.trend.sma_indicator(data['Close'], window=10)
-    data['MA_long'] = ta.trend.sma_indicator(data['Close'], window=50)
-    data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
-    data['MACD'] = ta.trend.macd_diff(data['Close'])
-    data['Stochastic'] = ta.momentum.stoch(data['High'], data['Low'], data['Close'])
-    data['Bollinger_High'] = ta.volatility.bollinger_hband(data['Close'])
-    data['Bollinger_Low'] = ta.volatility.bollinger_lband(data['Close'])
-    data['ADX'] = ta.trend.adx(data['High'], data['Low'], data['Close'])
-    data['OBV'] = ta.volume.on_balance_volume(data['Close'], data['Volume'])
-    data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
-    data = data.dropna()  # Eliminar filas con NaN
-    print(f"{Fore.GREEN}Indicadores técnicos calculados.{Style.RESET_ALL}")
-    return data
+    try:
+        print(f"{Fore.BLUE}Calculando indicadores técnicos...{Style.RESET_ALL}")
+        data['MA_short'] = ta.trend.sma_indicator(data['Close'], window=10)
+        data['MA_long'] = ta.trend.sma_indicator(data['Close'], window=50)
+        data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
+        data['MACD'] = ta.trend.macd_diff(data['Close'])
+        data['Stochastic'] = ta.momentum.stoch(data['High'], data['Low'], data['Close'])
+        data['Bollinger_High'] = ta.volatility.bollinger_hband(data['Close'])
+        data['Bollinger_Low'] = ta.volatility.bollinger_lband(data['Close'])
+        data['ADX'] = ta.trend.adx(data['High'], data['Low'], data['Close'])
+        data['OBV'] = ta.volume.on_balance_volume(data['Close'], data['Volume'])
+        data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
+        data = data.dropna()  # Eliminar filas con NaN
+        print(f"{Fore.GREEN}Indicadores técnicos calculados.{Style.RESET_ALL}")
+        return data
+    except Exception as e:
+        print(f"{Fore.RED}Error al calcular indicadores técnicos: {e}{Style.RESET_ALL}")
+        return None
 
 # Función para ejecutar una orden de compra
 def buy_order(symbol, quantity, price):
@@ -85,19 +90,12 @@ def buy_order(symbol, quantity, price):
 def sell_order(symbol, quantity, price, buy_price=None):
     try:
         print(f"{Fore.BLUE}Ejecutando orden de venta...{Style.RESET_ALL}")
-        
-        # Verificar saldo disponible antes de redondear
         available_asset = check_balance(symbol.replace('USDT', ''))
         quantity = min(quantity, available_asset)
-        
-        # Redondear la cantidad según las especificaciones de Binance
         quantity = round_quantity(symbol, quantity)
-        
-        # Verificar si la cantidad redondeada es válida
         if quantity <= 0:
             print(f"{Fore.RED}La cantidad a vender es inválida después de redondear.{Style.RESET_ALL}")
             return None
-        
         order = client.order_limit_sell(
             symbol=symbol,
             quantity=quantity,
@@ -110,19 +108,14 @@ def sell_order(symbol, quantity, price, buy_price=None):
         print(f"{Fore.RED}Error al ejecutar orden de venta: {e}{Style.RESET_ALL}")
         return None
 
-# Función para calcular el stop-loss
-def calculate_stop_loss(buy_price, atr, stop_loss_percentage):
-    print(f"{Fore.BLUE}Calculando stop-loss...{Style.RESET_ALL}")
+# Función para calcular el stop-loss y take-profit dinámicamente
+def calculate_dynamic_stop_loss_take_profit(buy_price, atr, volatility):
+    stop_loss_percentage = volatility * 2
+    take_profit_percentage = volatility * 4
     stop_loss_price = buy_price - atr * stop_loss_percentage
-    print(f"{Fore.GREEN}Stop-loss calculado: {stop_loss_price:.8f}{Style.RESET_ALL}")
-    return stop_loss_price
-
-# Función para calcular el take-profit
-def calculate_take_profit(buy_price, atr, take_profit_percentage):
-    print(f"{Fore.BLUE}Calculando take-profit...{Style.RESET_ALL}")
     take_profit_price = buy_price + atr * take_profit_percentage
-    print(f"{Fore.GREEN}Take-profit calculado: {take_profit_price:.8f}{Style.RESET_ALL}")
-    return take_profit_price
+    print(f"{Fore.GREEN}Stop-loss calculado: {stop_loss_price:.8f}, Take-profit calculado: {take_profit_price:.8f}{Style.RESET_ALL}")
+    return stop_loss_price, take_profit_price
 
 # Función para calcular las ganancias
 def calculate_profit(buy_price, sell_price, quantity):
@@ -133,38 +126,42 @@ def calculate_profit(buy_price, sell_price, quantity):
 
 # Función para entrenar el modelo LSTM
 def train_lstm_model(data, n_steps):
-    print(f"{Fore.BLUE}Entrenando modelo LSTM...{Style.RESET_ALL}")
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data[['Close']])
-    
-    X, y = [], []
-    for i in range(n_steps, len(scaled_data)):
-        X.append(scaled_data[i-n_steps:i, 0])
-        y.append(scaled_data[i, 0])
-    X, y = np.array(X), np.array(y)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    
-    model = Sequential()
-    model.add(LSTM(50, return_sequences=True, input_shape=(n_steps, 1)))
-    model.add(LSTM(50, return_sequences=False))
-    model.add(Dense(25))
-    model.add(Dense(1))
-    
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X, y, batch_size=1, epochs=1)
-    
-    print(f"{Fore.GREEN}Modelo LSTM entrenado.{Style.RESET_ALL}")
-    return model, scaler
+    try:
+        print(f"{Fore.BLUE}Entrenando modelo LSTM...{Style.RESET_ALL}")
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data[['Close']])
+        X, y = [], []
+        for i in range(n_steps, len(scaled_data)):
+            X.append(scaled_data[i-n_steps:i, 0])
+            y.append(scaled_data[i, 0])
+        X, y = np.array(X), np.array(y)
+        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=True, input_shape=(n_steps, 1)))
+        model.add(LSTM(50, return_sequences=False))
+        model.add(Dense(25))
+        model.add(Dense(1))
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        model.fit(X, y, batch_size=1, epochs=1)
+        print(f"{Fore.GREEN}Modelo LSTM entrenado.{Style.RESET_ALL}")
+        return model, scaler
+    except Exception as e:
+        print(f"{Fore.RED}Error al entrenar el modelo LSTM: {e}{Style.RESET_ALL}")
+        return None, None
 
 # Función para predecir con el modelo LSTM
 def predict_with_lstm(model, scaler, data, n_steps):
-    scaled_data = scaler.transform(data[['Close']])
-    X = []
-    X.append(scaled_data[-n_steps:, 0])
-    X = np.array(X)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    predictions = model.predict(X)
-    return scaler.inverse_transform(predictions)
+    try:
+        scaled_data = scaler.transform(data[['Close']])
+        X = []
+        X.append(scaled_data[-n_steps:, 0])
+        X = np.array(X)
+        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+        predictions = model.predict(X)
+        return scaler.inverse_transform(predictions)
+    except Exception as e:
+        print(f"{Fore.RED}Error al predecir con el modelo LSTM: {e}{Style.RESET_ALL}")
+        return None
 
 # Función para verificar el saldo disponible
 def check_balance(asset):
@@ -179,13 +176,16 @@ def check_balance(asset):
 
 # Función para redondear la cantidad según las especificaciones de Binance
 def round_quantity(symbol, quantity):
-    info = client.get_symbol_info(symbol)
-    step_size = float(next(filter(lambda x: x['filterType'] == 'LOT_SIZE', info['filters']))['stepSize'])
-    precision = int(round(-math.log(step_size, 10), 0))
-    # Usar floor para redondear hacia abajo
-    quantity = math.floor(quantity * (10 ** precision)) / (10 ** precision)
-    print(f"Step size: {step_size}, Precisión: {precision}, Cantidad original: {quantity}")
-    return quantity
+    try:
+        info = client.get_symbol_info(symbol)
+        step_size = float(next(filter(lambda x: x['filterType'] == 'LOT_SIZE', info['filters']))['stepSize'])
+        precision = int(round(-math.log(step_size, 10), 0))
+        quantity = math.floor(quantity * (10 ** precision)) / (10 ** precision)
+        print(f"Step size: {step_size}, Precisión: {precision}, Cantidad original: {quantity}")
+        return quantity
+    except Exception as e:
+        print(f"{Fore.RED}Error al redondear la cantidad: {e}{Style.RESET_ALL}")
+        return 0
 
 # Función para verificar la conexión a la API de Binance
 def check_connection():
@@ -216,24 +216,21 @@ def get_market_status(symbol):
         print(f"{Fore.RED}Error al obtener el estado del mercado: {e}{Style.RESET_ALL}")
         return None
 
-# Función para obtener las 10 mejores monedas por volumen
-def get_top_symbols():
+# Función para obtener las mejores monedas
+async def get_top_symbols():
     try:
-        tickers = client.get_ticker()
-        tickers_sorted = sorted(tickers, key=lambda x: float(x['volume']), reverse=True)
-        top_symbols = [ticker['symbol'] for ticker in tickers_sorted if 'USDT' in ticker['symbol']][:10]
-        print(f"{Fore.CYAN}Monedas seleccionadas:{Style.RESET_ALL}")
-        for i, symbol in enumerate(top_symbols, 1):
-            print(f"{i}. {symbol}")
-        return top_symbols
+        async with aiohttp.ClientSession() as session:
+            mejores_monedas_compra = await mejoresMonedas1OK.evaluar_monedas_compra(session, mejoresMonedas1OK.config)
+            print("\nMejores monedas para comprar:")
+            for moneda in mejores_monedas_compra:
+                print(moneda)
+            return [moneda['moneda'] for moneda in mejores_monedas_compra]
     except Exception as e:
         print(f"{Fore.RED}Error al obtener las mejores monedas: {e}{Style.RESET_ALL}")
         return []
 
 # Función principal del bot
 def trading_bot():
-    short_window = 10
-    long_window = 50
     lookback = '1000'
     interval = '1m'
     buy_price = None
@@ -244,8 +241,8 @@ def trading_bot():
     total_profit = 0
     unfavorable_market_start_time = None
 
-    # Obtener las 10 mejores monedas por volumen
-    top_symbols = get_top_symbols()
+    # Obtener las mejores monedas
+    top_symbols = asyncio.run(get_top_symbols())
     if not top_symbols:
         return
 
@@ -260,6 +257,8 @@ def trading_bot():
         return
     data = calculate_indicators(data)
     model, scaler = train_lstm_model(data, n_steps)
+    if model is None or scaler is None:
+        return
 
     try:
         while True:
@@ -274,7 +273,14 @@ def trading_bot():
                 continue
 
             data = calculate_indicators(data)
+            if data is None:
+                time.sleep(60)
+                continue
+
             prediction = predict_with_lstm(model, scaler, data, n_steps)
+            if prediction is None:
+                time.sleep(60)
+                continue
 
             # Verificar saldo disponible en la moneda seleccionada y USDT
             available_asset = check_balance(symbol.replace('USDT', ''))
@@ -294,8 +300,7 @@ def trading_bot():
                     order = buy_order(symbol, quantity, current_price)
                     if order:
                         buy_price = float(order['price'])
-                        stop_loss_price = calculate_stop_loss(buy_price, data['ATR'].iloc[-1], stop_loss_percentage)
-                        take_profit_price = calculate_take_profit(buy_price, data['ATR'].iloc[-1], take_profit_percentage)
+                        stop_loss_price, take_profit_price = calculate_dynamic_stop_loss_take_profit(buy_price, data['ATR'].iloc[-1], data['volatilidad'].iloc[-1])
                         print(f"{Fore.GREEN}Precio de compra: {buy_price:.8f}, Stop-loss: {stop_loss_price:.8f}, Take-profit: {take_profit_price:.8f}{Style.RESET_ALL}")
                         total_operations += 1
                         unfavorable_market_start_time = None
@@ -393,9 +398,9 @@ def trading_bot():
                 print(f"{Fore.YELLOW}Compra: {buy_price:.8f} | Venta objetivo: {take_profit_price:.8f}{Style.RESET_ALL}")
 
             # Separación con asteriscos
-            print("*" * 80)
+            print("*" * 180)
 
-            time.sleep(60)  # Esperar 60 segundos antes de la siguiente iteración
+            time.sleep(30)  # Esperar 60 segundos antes de la siguiente iteración
 
     except KeyboardInterrupt:
         print(f"{Fore.YELLOW}Bot detenido por el usuario.{Style.RESET_ALL}")
