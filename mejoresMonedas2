@@ -55,6 +55,10 @@ def get_historical_data(symbol, interval, lookback):
 def calculate_indicators(data):
     try:
         print(f"{Fore.BLUE}Calculando indicadores técnicos...{Style.RESET_ALL}")
+        if len(data) < 50:
+            print(f"{Fore.YELLOW}No hay suficientes datos para calcular todos los indicadores. Devolviendo datos sin indicadores.{Style.RESET_ALL}")
+            return data
+        
         data['MA_short'] = ta.trend.sma_indicator(data['Close'], window=10)
         data['MA_long'] = ta.trend.sma_indicator(data['Close'], window=50)
         data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
@@ -256,6 +260,8 @@ def trading_bot():
     if data is None:
         return
     data = calculate_indicators(data)
+    if data is None:
+        return
     model, scaler = train_lstm_model(data, n_steps)
     if model is None or scaler is None:
         return
@@ -398,7 +404,7 @@ def trading_bot():
                 print(f"{Fore.YELLOW}Compra: {buy_price:.8f} | Venta objetivo: {take_profit_price:.8f}{Style.RESET_ALL}")
 
             # Separación con asteriscos
-            print("*" * 180)
+            print("*" * 100)
 
             time.sleep(30)  # Esperar 60 segundos antes de la siguiente iteración
 
